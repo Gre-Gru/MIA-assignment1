@@ -1,0 +1,183 @@
+import os
+import numpy as np
+import matplotlib.pyplot as plt
+import scipy.io as sio
+from scipy import ndimage
+
+def load_image(filename):
+    image = plt.imread(filename)
+    # input image is color png depicting grayscale, just use first plane from here on
+    image = image[:, :, 1].astype(np.float64)
+    # after reading and converting to float, image is between 0 and 1, we want to compute within the range 0 and 255
+    image *= 255.0
+    #print(image.shape)
+    #print('image: min = ', np.min(image), ' max = ', np.max(image))
+    return image
+
+def pad_image(image):
+    # compute required padding for later rotation: we assume image has same width and height
+    padded_image_size = int(np.floor(image.shape[0] * np.sqrt(2)))
+    # make sure padded image has odd dimensions
+    if np.remainder(padded_image_size, 2) == 0:
+        padded_image_size += 1
+
+    # padding width is an integer since input size and padded size are both odd
+    padding_width = int((padded_image_size - image.shape[0]) / 2)
+
+    # place the input image into a padded version, extending with zeros
+    padded_image = np.zeros((padded_image_size, padded_image_size), dtype=np.float64)
+    padded_image[padding_width:image.shape[0] + padding_width,
+                 padding_width:image.shape[1] + padding_width] = image
+
+    return padded_image, padding_width
+
+def calculate_sinogram(image, num_angles):
+    image_size = image.shape[0]
+    image_size_1 = image.shape[1]
+    print(image_size,image_size_1)
+    thetas = np.linspace(0., 180., num_angles, endpoint=False)
+    # print(thetas.shape)
+    # print(thetas)
+
+    sinogram = np.zeros([num_angles, image_size], dtype=np.float64)
+
+    for i, theta in enumerate(thetas):
+        # print(theta)
+        # rotate image by angle, counterclockwise
+        imgR = ndimage.rotate(image, theta, order=1, reshape=False)
+
+        # compute projection along columns (axis == 0 means sum is along columns!)
+        projection_line = np.sum(imgR, axis=0)
+        #print(projection_line.shape)
+
+        # put projection lines into rows of sinogram (one row per discretized angle)
+        sinogram[i, :] = projection_line
+        
+        #plt.figure(figsize=(10, 5))
+        #plt.plot(projection_line, linestyle='-', color='b')
+        #plt.show()
+
+    return sinogram
+
+def back_projection_smear(sinogram, num_angles):
+
+    reconstructed_image = np.zeros((sinogram.shape[1], sinogram.shape[1]))
+    theta = np.linspace(0., 180., num_angles, endpoint=False)
+    smear = np.zeros((sinogram.shape[1], sinogram.shape[1]))
+
+    for i in range(num_angles):
+            projection = sinogram[i, :]
+
+            for x in range(sinogram.shape[1]):
+                    smear[:, x] = projection[x]
+        
+            projection_rotated = ndimage.rotate(smear, -theta[i], reshape=False)
+        
+            reconstructed_image += projection_rotated
+    
+    return reconstructed_image
+
+def ramp_filter(size):
+    kernel = np.zeros(size)
+    half_size = size // 2
+    kernel[1:half_size+1] = np.arange(1, half_size + 1)
+    kernel[-half_size:] = -kernel[:half_size][::-1]
+    return kernel
+
+def filtered_back_projection (sinogram, num_angles):
+
+    reconstructed_image = np.zeros((sinogram.shape[1], sinogram.shape[1]))
+    thetas = np.linspace(0., 180., num_angles, endpoint=False)
+
+    #freqs = np.fft.fftfreq(sinogram.shape[1]).reshape(-1, 1)
+
+    #for i, theta in enumerate(thetas):
+    #     
+    #     projection_fft = np.fft.fft(sinogram[i, :])
+    #     shifted_fft = np.fft.fftshift(projection_fft[i, :])
+    # 
+    #reconstructed_image /= num_angles
+
+    center = reconstructed_image.shape[0] // 2
+    filter_kernel = ramp_filter(sinogram.shape[0])
+    sinogram_freq = np.fft.fft(sinogram, axis=0)
+    sinogram_freq = np.fft.fftshift(sinogram_freq, axes=0)
+    filtered_sinogram = np.fft.ifft(sinogram_freq * filter_kernel[:, np.newaxis], axis=0).real
+
+    for i, theta in enumerate(np.deg2rad(thetas)): 
+         projection = filtered_sinogram[:, i] 
+         projection = np.tile(projection, (reconstructed_image.shape[0], 1))
+
+         rotated_projection = ndimage.rotate(projection, np.rad2deg(theta), reshape=False)
+         reconstructed_image += rotated_projection
+
+    #reconstructed_image /= num_angles
+
+    plt.imshow(reconstructed_image)
+    plt.show()
+
+    return reconstructed_image
+
+def filtered_back_projection_2(sinogram, num_angles): 
+    reconstructed_image = np.zeros((sinogram.shape[1], sinogram.shape[1])) 
+    thetas = np.linspace(0., 180., num_angles, endpoint=False) 
+    center = reconstructed_image.shape[0] // 2 
+    filter_kernel = ramp_filter(sinogram.shape[0]) 
+    sinogram_freq = np.fft.fft(sinogram, axis=0) 
+    sinogram_freq = np.fft.fftshift(sinogram_freq, axes=0) 
+    filtered_sinogram = np.fft.ifft(sinogram_freq * filter_kernel[:, np.newaxis], axis=0).real 
+    
+    for i, theta in enumerate(np.deg2rad(thetas)): 
+        projection = filtered_sinogram[:, i] 
+        projection = np.tile(projection, (reconstructed_image.shape[0], 1)) 
+        rotated_projection = ndimage.rotate(projection, np.rad2deg(theta), reshape=False) 
+        pad_width = ((0, reconstructed_image.shape[0] - rotated_projection.shape[0]), (0, reconstructed_image.shape[1] - rotated_projection.shape[1])) 
+        rotated_projection = np.pad(rotated_projection, pad_width, mode='constant') 
+        
+        reconstructed_image += rotated_projection 
+
+    plt.imshow(reconstructed_image, cmap=plt.cm.gray) 
+    plt.title('Reconstructed Image') 
+    plt.show() 
+    return reconstructed_image
+
+def main():
+
+    filename = 'CTThoraxSlice257.png'
+
+    # note: angles are always between 0 and 180 degree, more angles are not necessary since projections would be redundant
+    # if num_of_angle_steps is 360, we will therefore have a discretization into 360 angle steps between 0 and 180 degree (every half angle is used)
+    # you are supposed to experiment with this number to simulate lower numbers of projection lines!
+    num_of_angle_steps = 360
+
+    # load and pad image
+    image = load_image(filename)
+    padded_image, padding_width = pad_image(image)
+    print('padding width: ', padding_width)
+
+    # calculate and save sinogram
+    sinogram = calculate_sinogram(padded_image, num_of_angle_steps)
+    sio.savemat('sinogram.mat', { 'sinogram': sinogram })
+    BP_smear = back_projection_smear(sinogram,num_of_angle_steps)
+    print('Back projection shape: ',BP_smear.shape)
+    FBP = filtered_back_projection_2(sinogram,num_of_angle_steps)
+    print('Back projection shape: ',FBP.shape)
+    print('sinogram: min = ', np.min(sinogram), ' max = ', np.max(sinogram))
+
+    
+    
+    fig, axarr = plt.subplots(2, 3,figsize=(12, 8))
+
+    axarr[0, 0].imshow(image, cmap=plt.cm.gray)
+    axarr[0, 1].imshow(padded_image, cmap=plt.cm.gray)
+    axarr[0, 2].imshow(sinogram, cmap=plt.cm.gray)
+    axarr[1, 0].plot(sinogram[0,:])
+    axarr[1, 1].imshow(BP_smear, cmap=plt.cm.gray)
+    axarr[1, 2].imshow(FBP, cmap=plt.cm.gray)
+    #axarr[1, 0].set_ylabel('Angles')
+    #axarr[1, 0].set_xlabel('Projected Values')
+
+    plt.show()
+
+if __name__ == "__main__":
+    main()
